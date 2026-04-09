@@ -16,7 +16,7 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ans Christy K L");
 MODULE_DESCRIPTION("OS Assignment 1");
 
-static dev_t dev_num; 
+static dev_t dev_num;
 static struct cdev my_cdev;
 
 static struct class *my_class;
@@ -28,6 +28,7 @@ static int read_done = 0;
 
 static wait_queue_head_t my_wq;
 static int timed_out = 0;
+static long wait_ret;
 
 static int order_ok = 0;
 
@@ -41,40 +42,63 @@ module_param_array(kernel_version, int, &kernel_version_count, 0);
 module_param(timer, int, 0);
 
 static char read_msg[] = "Hello from kernel device\n";
-static ssize_t my_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) {
-    printk(KERN_INFO "mymodule: read called\n");
-    read_done = 1;
+static ssize_t my_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
+{
+  printk(KERN_INFO "mymodule: read called\n");
+  read_done = 1;
 
-    wake_up_interruptible(&my_wq);
-    
-    size_t len = strlen(read_msg);
-    if (*ppos >= len) return 0;
-    if (count > len - *ppos) count = len - *ppos;
-    if (copy_to_user(buf, read_msg + *ppos, count) != 0) return -EFAULT;
+  wake_up_interruptible(&my_wq);
 
-    *ppos += count;
-    return count;
+  size_t len = strlen(read_msg);
+  if (*ppos >= len)
+    return 0;
+  if (count > len - *ppos)
+    count = len - *ppos;
+  if (copy_to_user(buf, read_msg + *ppos, count) != 0)
+    return -EFAULT;
+
+  *ppos += count;
+  return count;
 }
 
-static ssize_t my_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos) {
-    printk(KERN_INFO "mymodule: write called\n");
+static ssize_t my_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+  printk(KERN_INFO "mymodule: write called\n");
+  wait_ret = 1;
 
-    if (!read_done) {
-        printk(KERN_ERR "mymodule: write happened before read\n");
-        return -EINVAL;
-    }
+  if (!read_done)
+  {
+    printk(KERN_ERR "mymodule: waiting for read...\n");
 
-    if (count >= sizeof(username)) count = sizeof(username) - 1;
+    wait_ret = wait_event_interruptible_timeout(my_wq, read_done != 0, timer * HZ);
+  }
 
-    if (copy_from_user(username, buf, count) != 0) return -EFAULT;
+  if (wait_ret == 0)
+  {
+    timed_out = 1;
+    printk(KERN_ERR "mymodule: timeout happened before read\n");
+    return -ETIMEDOUT;
+  }
 
-    username[count] = '\0';
-    username_written = 1;
-    order_ok = 1;
+  if (wait_ret < 0)
+  {
+    printk(KERN_ERR "mymodule: wait was interrupted\n");
+    return wait_ret;
+  }
 
-    printk(KERN_INFO "mymodule: username stored = %s\n", username);
+  if (count >= sizeof(username))
+    count = sizeof(username) - 1;
 
-    return count;
+  if (copy_from_user(username, buf, count) != 0)
+    return -EFAULT;
+
+  username[count] = '\0';
+  username_written = 1;
+  order_ok = 1;
+
+  printk(KERN_INFO "mymodule: username stored = %s\n", username);
+
+  return count;
 }
 
 static struct file_operations fops = {
@@ -83,104 +107,117 @@ static struct file_operations fops = {
     .write = my_write,
 };
 
-static int __init my_init(void) {
-    int ret;
-    int build_major, build_minor;
-    printk(KERN_INFO "mymodule: loaded\n");
+static int __init my_init(void)
+{
+  int ret;
+  int build_major, build_minor;
+  printk(KERN_INFO "mymodule: loaded\n");
 
-    build_major = (LINUX_VERSION_CODE >> 16) & 0xFF;
-    build_minor = (LINUX_VERSION_CODE >> 8) & 0xFF;
+  build_major = (LINUX_VERSION_CODE >> 16) & 0xFF;
+  build_minor = (LINUX_VERSION_CODE >> 8) & 0xFF;
 
-    init_waitqueue_head(&my_wq);
+  init_waitqueue_head(&my_wq);
 
-    if (kernel_version_count != 2) {
-        printk(KERN_ERR "Error: pass kernel_version as major,minor\n");
-        return -EINVAL;
-    }
+  if (kernel_version_count != 2)
+  {
+    printk(KERN_ERR "Error: pass kernel_version as major,minor\n");
+    return -EINVAL;
+  }
 
-    if (timer <= 0) {
-        printk(KERN_ERR "Error: timer must be > 0\n");
-        return -EINVAL;
-    }
+  if (timer <= 0)
+  {
+    printk(KERN_ERR "Error: timer must be > 0\n");
+    return -EINVAL;
+  }
 
-    printk(KERN_INFO "kernel_version_count = %d\n", kernel_version_count);
+  printk(KERN_INFO "kernel_version_count = %d\n", kernel_version_count);
 
-    if (kernel_version_count == 2) {
-        printk(KERN_INFO "kernel_version = %d.%d\n",
-               kernel_version[0], kernel_version[1]);
-    }
+  if (kernel_version_count == 2)
+  {
+    printk(KERN_INFO "kernel_version = %d.%d\n", kernel_version[0], kernel_version[1]);
+  }
 
-    if (kernel_version[0] != build_major ||
-        kernel_version[1] != build_minor) {
+  if (kernel_version[0] != build_major ||
+      kernel_version[1] != build_minor)
+  {
 
-        printk(KERN_ERR "Error: kernel version mismatch\n");
-        return -EINVAL;
-    }
+    printk(KERN_ERR "Error: kernel version mismatch\n");
+    return -EINVAL;
+  }
 
-    printk(KERN_INFO "mymodule: version matched\n");
-    printk(KERN_INFO "timer = %d seconds\n", timer);
+  printk(KERN_INFO "mymodule: version matched\n");
+  printk(KERN_INFO "timer = %d seconds\n", timer);
 
-    ret = alloc_chrdev_region(&dev_num, 0, 1, "mymodule");
-    if (ret < 0) {
-        printk(KERN_ERR "Error: failed to allocate device number\n");
-        return ret;
-    }
+  ret = alloc_chrdev_region(&dev_num, 0, 1, "mymodule");
+  if (ret < 0)
+  {
+    printk(KERN_ERR "Error: failed to allocate device number\n");
+    return ret;
+  }
 
-    printk(KERN_INFO "major = %d, minor = %d\n", MAJOR(dev_num), MINOR(dev_num));
+  printk(KERN_INFO "major = %d, minor = %d\n", MAJOR(dev_num), MINOR(dev_num));
 
-    cdev_init(&my_cdev, &fops);
-    my_cdev.owner = THIS_MODULE;
+  cdev_init(&my_cdev, &fops);
+  my_cdev.owner = THIS_MODULE;
 
-    ret = cdev_add(&my_cdev, dev_num, 1);
-    if (ret < 0) {
-        printk(KERN_ERR "Error: cdev_add failed\n");
-        unregister_chrdev_region(dev_num, 1);
-        return ret;
-    }
+  ret = cdev_add(&my_cdev, dev_num, 1);
+  if (ret < 0)
+  {
+    printk(KERN_ERR "Error: cdev_add failed\n");
+    unregister_chrdev_region(dev_num, 1);
+    return ret;
+  }
 
-    my_class = class_create("mymodule_class");
-    if (IS_ERR(my_class)) {
-        cdev_del(&my_cdev);
-        unregister_chrdev_region(dev_num, 1);
-        return PTR_ERR(my_class);
-    }
+  my_class = class_create("mymodule_class");
+  if (IS_ERR(my_class))
+  {
+    cdev_del(&my_cdev);
+    unregister_chrdev_region(dev_num, 1);
+    return PTR_ERR(my_class);
+  }
 
-    my_device = device_create(my_class, NULL, dev_num, NULL, "mymodule");
-    if (IS_ERR(my_device)) {
-        class_destroy(my_class);
-        cdev_del(&my_cdev);
-        unregister_chrdev_region(dev_num, 1);
-        return PTR_ERR(my_device);
-    }
-
-    start_jiffies = jiffies;
-    return 0;
-}
-
-static void __exit my_exit(void) {
-    unsigned long elapsed_jiffies;
-    unsigned long elapsed_seconds;
-
-    elapsed_jiffies = jiffies - start_jiffies;
-    elapsed_seconds = elapsed_jiffies / HZ;
-
-    printk(KERN_INFO "mymodule: read_done = %d, username_written = %d, order_ok = %d\n", read_done, username_written, order_ok);
-
-    if (username_written) printk(KERN_INFO "mymodule: stored username = %s\n", username);
-
-    printk(KERN_INFO "mymodule: elapsed time = %lu seconds\n", elapsed_seconds);
-
-    if (read_done && username_written && order_ok && elapsed_seconds <= timer) {
-        printk(KERN_INFO "Successfully completed the actions within time. Username: %s\n", username);
-    } else {
-        printk(KERN_ERR "Failed to complete the actions correctly within time\n");
-    }
-
-    device_destroy(my_class, dev_num);
+  my_device = device_create(my_class, NULL, dev_num, NULL, "mymodule");
+  if (IS_ERR(my_device))
+  {
     class_destroy(my_class);
     cdev_del(&my_cdev);
     unregister_chrdev_region(dev_num, 1);
-    printk(KERN_INFO "mymodule: removed\n");
+    return PTR_ERR(my_device);
+  }
+
+  start_jiffies = jiffies;
+  return 0;
+}
+
+static void __exit my_exit(void)
+{
+  unsigned long elapsed_jiffies;
+  unsigned long elapsed_seconds;
+
+  elapsed_jiffies = jiffies - start_jiffies;
+  elapsed_seconds = elapsed_jiffies / HZ;
+
+  printk(KERN_INFO "mymodule: read_done = %d, username_written = %d, order_ok = %d\n", read_done, username_written, order_ok);
+
+  if (username_written)
+    printk(KERN_INFO "mymodule: stored username = %s\n", username);
+
+  printk(KERN_INFO "mymodule: elapsed time = %lu seconds\n", elapsed_seconds);
+
+  if (!timed_out && read_done && username_written && order_ok && elapsed_seconds <= timer)
+  {
+    printk(KERN_INFO "Successfully completed the actions within time. Username: %s\n", username);
+  }
+  else
+  {
+    printk(KERN_ERR "Failed to complete the actions correctly within time\n");
+  }
+
+  device_destroy(my_class, dev_num);
+  class_destroy(my_class);
+  cdev_del(&my_cdev);
+  unregister_chrdev_region(dev_num, 1);
+  printk(KERN_INFO "mymodule: removed\n");
 }
 
 module_init(my_init);
